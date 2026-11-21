@@ -281,6 +281,33 @@ router.patch('/:id/status', async (req, res) => {
       })
     );
 
+    // Also sync moderation status to MatrimonyUsers table if userId is linked
+    if (existing.Item.userId) {
+      try {
+        const userRes = await docClient.send(
+          new GetCommand({
+            TableName: USERS_TABLE,
+            Key: { id: existing.Item.userId },
+          })
+        );
+        if (userRes.Item) {
+          await docClient.send(
+            new PutCommand({
+              TableName: USERS_TABLE,
+              Item: {
+                ...userRes.Item,
+                status: updatedFields.status,
+                isVerified: updatedFields.isVerified,
+                updatedAt: new Date().toISOString(),
+              },
+            })
+          );
+        }
+      } catch (uErr) {
+        console.warn('[Sync User Status Warning]', uErr.message);
+      }
+    }
+
     const normalized = await normalizeAndSignProfile(updatedItem);
     return res.json({
       success: true,

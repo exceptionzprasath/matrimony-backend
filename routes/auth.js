@@ -145,6 +145,8 @@ router.post('/register', async (req, res) => {
       phone: cleanPhone,
       password: hashedPassword,
       role: 'user',
+      status: 'pending',
+      isVerified: false,
       activeProfileId: profileId,
       membershipTier: 'gold',
       membershipExpiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
@@ -321,6 +323,78 @@ router.post('/login', async (req, res) => {
       profile = pRes.Item || null;
     }
 
+    if (!profile) {
+      // Fallback lookup by userId
+      const scanRes = await docClient.send(
+        new ScanCommand({
+          TableName: PROFILES_TABLE,
+          FilterExpression: 'userId = :uid',
+          ExpressionAttributeValues: { ':uid': user.id },
+        })
+      );
+      if (scanRes.Items && scanRes.Items.length > 0) {
+        profile = scanRes.Items[0];
+      }
+    }
+
+    if (!profile) {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_NOT_FOUND',
+        status: 'deleted',
+        message: 'Your profile was not found or has been deleted by the administrator.',
+      });
+    }
+
+    // Determine effective moderation status
+    const profileStatus = (
+      profile.status ||
+      user.status ||
+      (profile.isVerified === true ? 'approved' : 'pending')
+    ).toLowerCase();
+
+    // 1. Check if account is SUSPENDED
+    if (profileStatus === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_SUSPENDED',
+        status: 'suspended',
+        message:
+          profile.suspensionReason
+            ? `Your account has been suspended: ${profile.suspensionReason}. Please contact admin support.`
+            : 'Your account has been suspended by the administrator. Please contact support.',
+      });
+    }
+
+    // 2. Check if profile is REJECTED
+    if (profileStatus === 'rejected') {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_REJECTED',
+        status: 'rejected',
+        message:
+          profile.rejectionReason
+            ? `Your profile verification was rejected by admin (${profile.rejectionReason}).`
+            : 'Your profile verification was rejected by the administrator.',
+      });
+    }
+
+    // 3. Check if profile is APPROVED by Admin
+    const isApproved =
+      profileStatus === 'approved' ||
+      profileStatus === 'active' ||
+      profile.isVerified === true;
+
+    if (!isApproved) {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_PENDING_APPROVAL',
+        status: 'pending',
+        message:
+          'Your profile is currently pending admin approval. You can log in once the administrator approves your profile.',
+      });
+    }
+
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       JWT_SECRET,
@@ -377,57 +451,66 @@ router.post('/verify-otp', async (req, res) => {
     let profile = null;
 
     if (!user) {
-      // Create new user automatically for this phone
-      const userId = `usr_${Date.now()}`;
-      const profileId = `mm-g-${Date.now().toString().slice(-6)}`;
-      const now = new Date().toISOString();
+      return res.status(404).json({
+        success: false,
+        code: 'ACCOUNT_NOT_FOUND',
+        message: 'No account found with this mobile number. Please register first.',
+      });
+    }
 
-      user = {
-        id: userId,
-        name: `Member ${cleanPhone.slice(-4)}`,
-        phone: cleanPhone,
-        role: 'user',
-        activeProfileId: profileId,
-        membershipTier: 'gold',
-        membershipExpiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-        contactsViewedRemaining: 50,
-        interestsRemaining: 100,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      profile = {
-        id: profileId,
-        userId: userId,
-        matrimonyId: `MM${Math.floor(100000 + Math.random() * 900000)}`,
-        name: `Member ${cleanPhone.slice(-4)}`,
-        gender: 'groom',
-        phone: cleanPhone,
-        createdFor: 'self',
-        age: 28,
-        dateOfBirth: '1998-01-01',
-        height: "5' 6\"",
-        maritalStatus: 'never_married',
-        religion: 'Hindu',
-        education: 'Bachelor Degree',
-        profession: 'Software Professional',
-        city: 'Chennai',
-        state: 'Tamil Nadu',
-        country: 'India',
-        photos: ['https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=600&q=80'],
-        verified: true,
-        trustScore: 85,
-        membershipTier: 'gold',
-        createdAt: now,
-      };
-
-      await docClient.send(new PutCommand({ TableName: USERS_TABLE, Item: user }));
-      await docClient.send(new PutCommand({ TableName: PROFILES_TABLE, Item: profile }));
-    } else if (user.activeProfileId) {
+    if (user.activeProfileId) {
       const pRes = await docClient.send(
         new GetCommand({ TableName: PROFILES_TABLE, Key: { id: user.activeProfileId } })
       );
       profile = pRes.Item || null;
+    }
+
+    if (!profile) {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_NOT_FOUND',
+        status: 'deleted',
+        message: 'Your profile was not found or has been deleted by the administrator.',
+      });
+    }
+
+    const profileStatus = (
+      profile.status ||
+      user.status ||
+      (profile.isVerified === true ? 'approved' : 'pending')
+    ).toLowerCase();
+
+    if (profileStatus === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_SUSPENDED',
+        status: 'suspended',
+        message: 'Your account has been suspended by the administrator. Please contact support.',
+      });
+    }
+
+    if (profileStatus === 'rejected') {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_REJECTED',
+        status: 'rejected',
+        message: 'Your profile verification was rejected by the administrator.',
+      });
+    }
+
+    const isApproved =
+      profileStatus === 'approved' ||
+      profileStatus === 'active' ||
+      profile.isVerified === true;
+
+    if (!isApproved) {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_PENDING_APPROVAL',
+        status: 'pending',
+        message:
+          'Your profile is currently pending admin approval. You can log in once the administrator approves your profile.',
+      });
     }
 
     const token = jwt.sign(
